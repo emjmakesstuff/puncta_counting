@@ -95,5 +95,5 @@ hold off;
 
 %% ---- Delete all but useful outputs ---- %%
 
-% clearvars -except counts
+clearvars -except counts
 
