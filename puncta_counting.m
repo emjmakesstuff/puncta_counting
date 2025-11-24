@@ -8,110 +8,92 @@
 %   - MIJ.jar and ij.jar on MATLAB path
 %   - ReadImageJROI downloaded
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% --- Reading in Data --- %%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+clear all; close all;
 
-% Clear all persisting variables
-clear; close all force; clc;
+% Load files
+zipPath = '101_A4_fov5_20x__2025_09__RGB_maxproj_rois.zip';
+tifPath = 'MAX_101_A4_fov5_20x__2025_09_30__15_11_46.tif';
 
-% Read inputs from cellpose (TIF and a zip file of cell ROIs)
-% zip_filename = ('example_data/101_A4_fov5_20x__2025_09__RGB_maxproj_rois.zip');
-% tif_filename = ('MAX_101_A4_fov5_20x__2025_09_30__15_11_46.tif');
-% zip_filename = ('Stack_RGB_rois.zip');
-tif_filename = ('synchrony29_c1-2_image034.tif');
+info = imfinfo(tifPath);
+numFrames = numel(info);
 
-% Get image info
-image_info = imfinfo(tif_filename);
-numChannels = length(image_info);
-firstImage = imread(tif_filename, 1);
-[rows, cols] = size(firstImage);
-imageData = zeros(rows, cols, numChannels, class(firstImage));
-
-for i = 1:numChannels
-    imageData(:,:,i) = imread(tif_filename, i);
-    % figure; imagesc(imageData(:,:,i));
+stack = zeros(info(1).Height, info(1).Width, numFrames, 'uint16');
+for k = 1:numFrames
+    stack(:,:,k) = imread(tifPath, k);
 end
 
-vnImageSize = [rows, cols];
+% Extract channel 2 (adjust if your stack is 3D)
+channel2 = stack(:,:,2);
 
-% % Read ROIs into a 1xnum_cells cell array
-% [cvsROIs] = ReadImageJROI(zip_filename);
-% [sRegions] = ROIs2Regions(cvsROIs, vnImageSize);
-% 
-% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% %% --- Plotting Base Cells and ROIs --- %%
-% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% 
-% % --- Select base grayscale image (e.g., DAPI or brightfield channel) ---
-% baseChannel = 4;  % Change this if needed
-% img_gray = mat2gray(imageData(:,:,baseChannel));
-% 
-% % --- Display grayscale background ---
-% figure;
-% imshow(img_gray, []); hold on;
-% title('Cell ROIs overlaid on grayscale image');
-% colormap(gray);
-% 
-% % --- Overlay ROI boundaries ---
-% numCells = numel(sRegions.PixelIdxList);
-% % colors = hsv(numCells);  % Distinct color per ROI
-% 
-% for i = 1:numCells
-%     idx = sRegions.PixelIdxList{i};
-%     if isempty(idx)
-%         continue
-%     end
-%     % Convert linear indices to coordinates
-%     [x, y] = ind2sub(vnImageSize, double(idx));
-% 
-%     % Get convex boundary of the region (or use boundary() for irregular)
-%     try
-%         k = boundary(x, y);
-%         plot(x(k), y(k), '-', 'Color', 'y', 'LineWidth', 0.25);
-%     catch
-%         % If boundary() fails (too few points), just scatter them
-%         plot(x, y, '.', 'Color', 'y', 'MarkerSize', 0.25);
-%     end
-% end
-% 
-% % hold off;
-% axis image;
-% set(gca, 'YDir', 'reverse');
-% title('Cell ROIs overlaid on grayscale image');
+% Build ROI mask
+roiMask = loadFijiROIZip(zipPath, size(channel2));
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% --- Puncta Counting --- %%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Compute GMM threshold
+mu = fitGaussianMixtureToImage('MAX_101_A4_fov5_20x__2025_09_30__15_11_46.tif', 2, false);
+thresh = max(mu);
 
-puncta_img = imageData(:,:,2);
-intensity = 0.25; % Ideally use same value for all images in dataset
+% Count puncta inside those ROIs
+counts = countPunctaInROIs(channel2, roiMask);
+punctaAreas = countPunctaAreaInROIs(channel2, roiMask, thresh);
+counts.punctaAreas = punctaAreas.counts;
+counts.totalArea = punctaAreas.bw;
 
-% Create binary image for calculating puncta area
-puncta_bw = mat2gray(puncta_img);
-puncta_binary = imbinarize(puncta_bw, intensity); % using int threshold, make binary puncta img
+% Convert puncta area from pixels to um
+xRes = info(1).XResolution;
+yRes = info(1).YResolution;
+pixelArea = xRes * yRes;  % µm² per pixel
+counts.punctaAreas = counts.punctaAreas .* pixelArea;
+
+%% ---- Plot ROIs + puncta count overlay ---- %%
 figure;
-imshowpair(puncta_img,puncta_binary,'montage')
-
-% Count puncta
-se = strel('disk', 1);                  % smooth by creating small disks over each high point (puncta size)
-bw2 = imopen(puncta_bw, se);            % create bw image over smoothed points
-% figure;
-% surf(bw2, 'EdgeColor','none');
-B = imextendedmax(bw2, 0.015);           % set relative height
-cc = bwconncomp(B);
-stats = regionprops(cc, 'Centroid');    % find centroids
-centroids = cat(1, stats.Centroid);
-
-% Plot puncta points over bw image
-figure;
-imshow(puncta_bw, []);
+imshow(channel2, [], 'InitialMagnification', 'fit'); 
 hold on;
-plot(centroids(:,1), centroids(:,2), 'r.', 'MarkerSize', 5, 'LineWidth', 1);
-title('Detected puncta');
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% --- Formatting Puncta Outputs --- %%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% --- ROI overlay ---
+roiRGB = label2rgb(roiMask, 'jet', 'k', 'shuffle');
+h = imshow(roiRGB);
+set(h, 'AlphaData', 0.25);   % Transparency so image shows underneath
 
+% --- ROI boundaries (optional but very useful for visual QC) ---
+boundaries = bwboundaries(roiMask > 0);
+for b = 1:length(boundaries)
+    boundary = boundaries{b};
+    plot(boundary(:,2), boundary(:,1), 'w-', 'LineWidth', 1.5);
+end
+
+% --- Puncta markers ---
+if ~isempty(counts.centroids)
+    plot(counts.centroids(:,1), counts.centroids(:,2), 'r.', 'MarkerSize', 2);
+end
+
+title('ROIs + boundaries + puncta centroids');
+hold off;
+
+%% ---- Plot ROIs + puncta area overlay ---- %%
+figure;
+imshow(channel2, [], 'InitialMagnification', 'fit'); 
+hold on;
+
+% --- ROI overlay ---
+roiRGB = label2rgb(roiMask, 'jet', 'k', 'shuffle');
+h = imshow(roiRGB);
+set(h, 'AlphaData', 0.25);   % Transparency so image shows underneath
+
+% --- Puncta bw area ---
+i = imshow(counts.totalArea);
+set(i, 'AlphaData', 0.5);
+
+% --- ROI boundaries (optional but very useful for visual QC) ---
+boundaries = bwboundaries(roiMask > 0);
+for b = 1:length(boundaries)
+    boundary = boundaries{b};
+    plot(boundary(:,2), boundary(:,1), 'w-', 'LineWidth', 1.5);
+end
+
+title('ROIs + boundaries + puncta area');
+hold off;
+
+%% ---- Delete all but useful outputs ---- %%
+
+% clearvars -except counts
 
